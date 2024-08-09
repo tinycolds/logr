@@ -35,7 +35,6 @@ limitations under the License.
 package funcr
 
 import (
-	"bytes"
 	"encoding"
 	"encoding/json"
 	"fmt"
@@ -45,6 +44,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/valyala/bytebufferpool"
 
 	"github.com/go-logr/logr"
 )
@@ -251,9 +252,13 @@ type PseudoStruct []interface{}
 // render produces a log line, ready to use.
 func (f Formatter) render(builtins, args []interface{}) string {
 	// Empirically bytes.Buffer is faster than strings.Builder for this.
-	buf := bytes.NewBuffer(make([]byte, 0, 1024))
+	buf := bytebufferpool.Get()
+	defer func() {
+		bytebufferpool.Put(buf)
+	}()
+
 	if f.outputFormat == outputJSON {
-		buf.WriteByte('{')
+		_ = buf.WriteByte('{')
 	}
 	vals := builtins
 	if hook := f.opts.RenderBuiltinsHook; hook != nil {
@@ -264,13 +269,13 @@ func (f Formatter) render(builtins, args []interface{}) string {
 	if len(f.valuesStr) > 0 {
 		if continuing {
 			if f.outputFormat == outputJSON {
-				buf.WriteByte(',')
+				_ = buf.WriteByte(',')
 			} else {
-				buf.WriteByte(' ')
+				_ = buf.WriteByte(' ')
 			}
 		}
 		continuing = true
-		buf.WriteString(f.valuesStr)
+		_, _ = buf.WriteString(f.valuesStr)
 	}
 	vals = args
 	if hook := f.opts.RenderArgsHook; hook != nil {
@@ -278,7 +283,7 @@ func (f Formatter) render(builtins, args []interface{}) string {
 	}
 	f.flatten(buf, vals, continuing, true) // escape user-provided keys
 	if f.outputFormat == outputJSON {
-		buf.WriteByte('}')
+		_ = buf.WriteByte('}')
 	}
 	return buf.String()
 }
@@ -292,7 +297,7 @@ func (f Formatter) render(builtins, args []interface{}) string {
 // This function returns a potentially modified version of kvList, which
 // ensures that there is a value for every key (adding a value if needed) and
 // that each key is a string (substituting a key if needed).
-func (f Formatter) flatten(buf *bytes.Buffer, kvList []interface{}, continuing bool, escapeKeys bool) []interface{} {
+func (f Formatter) flatten(buf *bytebufferpool.ByteBuffer, kvList []interface{}, continuing bool, escapeKeys bool) []interface{} {
 	// This logic overlaps with sanitize() but saves one type-cast per key,
 	// which can be measurable.
 	if len(kvList)%2 != 0 {
@@ -308,28 +313,28 @@ func (f Formatter) flatten(buf *bytes.Buffer, kvList []interface{}, continuing b
 
 		if i > 0 || continuing {
 			if f.outputFormat == outputJSON {
-				buf.WriteByte(',')
+				_ = buf.WriteByte(',')
 			} else {
 				// In theory the format could be something we don't understand.  In
 				// practice, we control it, so it won't be.
-				buf.WriteByte(' ')
+				_ = buf.WriteByte(' ')
 			}
 		}
 
 		if escapeKeys {
-			buf.WriteString(prettyString(k))
+			_, _ = buf.WriteString(prettyString(k))
 		} else {
 			// this is faster
-			buf.WriteByte('"')
-			buf.WriteString(k)
-			buf.WriteByte('"')
+			_ = buf.WriteByte('"')
+			_, _ = buf.WriteString(k)
+			_ = buf.WriteByte('"')
 		}
 		if f.outputFormat == outputJSON {
-			buf.WriteByte(':')
+			_ = buf.WriteByte(':')
 		} else {
-			buf.WriteByte('=')
+			_ = buf.WriteByte('=')
 		}
-		buf.WriteString(f.pretty(v))
+		_, _ = buf.WriteString(f.pretty(v))
 	}
 	return kvList
 }
@@ -400,28 +405,33 @@ func (f Formatter) prettyWithFlags(value interface{}, flags uint32, depth int) s
 	case complex128:
 		return `"` + strconv.FormatComplex(v, 'f', -1, 128) + `"`
 	case PseudoStruct:
-		buf := bytes.NewBuffer(make([]byte, 0, 1024))
+		buf := bytebufferpool.Get()
 		v = f.sanitize(v)
 		if flags&flagRawStruct == 0 {
-			buf.WriteByte('{')
+			_ = buf.WriteByte('{')
 		}
 		for i := 0; i < len(v); i += 2 {
 			if i > 0 {
-				buf.WriteByte(',')
+				_ = buf.WriteByte(',')
 			}
 			k, _ := v[i].(string) // sanitize() above means no need to check success
 			// arbitrary keys might need escaping
-			buf.WriteString(prettyString(k))
-			buf.WriteByte(':')
-			buf.WriteString(f.prettyWithFlags(v[i+1], 0, depth+1))
+			_, _ = buf.WriteString(prettyString(k))
+			_ = buf.WriteByte(':')
+			_, _ = buf.WriteString(f.prettyWithFlags(v[i+1], 0, depth+1))
 		}
 		if flags&flagRawStruct == 0 {
-			buf.WriteByte('}')
+			_ = buf.WriteByte('}')
 		}
-		return buf.String()
+		s := buf.String()
+		bytebufferpool.Put(buf)
+		return s
 	}
 
-	buf := bytes.NewBuffer(make([]byte, 0, 256))
+	buf := bytebufferpool.Get()
+	defer func() {
+		bytebufferpool.Put(buf)
+	}()
 	t := reflect.TypeOf(value)
 	if t == nil {
 		return "null"
@@ -446,7 +456,7 @@ func (f Formatter) prettyWithFlags(value interface{}, flags uint32, depth int) s
 		return `"` + strconv.FormatComplex(v.Complex(), 'f', -1, 128) + `"`
 	case reflect.Struct:
 		if flags&flagRawStruct == 0 {
-			buf.WriteByte('{')
+			_ = buf.WriteByte('{')
 		}
 		printComma := false // testing i>0 is not enough because of JSON omitted fields
 		for i := 0; i < t.NumField(); i++ {
@@ -481,25 +491,25 @@ func (f Formatter) prettyWithFlags(value interface{}, flags uint32, depth int) s
 				continue
 			}
 			if printComma {
-				buf.WriteByte(',')
+				_ = buf.WriteByte(',')
 			}
 			printComma = true // if we got here, we are rendering a field
 			if fld.Anonymous && fld.Type.Kind() == reflect.Struct && name == "" {
-				buf.WriteString(f.prettyWithFlags(v.Field(i).Interface(), flags|flagRawStruct, depth+1))
+				_, _ = buf.WriteString(f.prettyWithFlags(v.Field(i).Interface(), flags|flagRawStruct, depth+1))
 				continue
 			}
 			if name == "" {
 				name = fld.Name
 			}
 			// field names can't contain characters which need escaping
-			buf.WriteByte('"')
-			buf.WriteString(name)
-			buf.WriteByte('"')
-			buf.WriteByte(':')
-			buf.WriteString(f.prettyWithFlags(v.Field(i).Interface(), 0, depth+1))
+			_ = buf.WriteByte('"')
+			_, _ = buf.WriteString(name)
+			_ = buf.WriteByte('"')
+			_ = buf.WriteByte(':')
+			_, _ = buf.WriteString(f.prettyWithFlags(v.Field(i).Interface(), 0, depth+1))
 		}
 		if flags&flagRawStruct == 0 {
-			buf.WriteByte('}')
+			_ = buf.WriteByte('}')
 		}
 		return buf.String()
 	case reflect.Slice, reflect.Array:
@@ -510,31 +520,31 @@ func (f Formatter) prettyWithFlags(value interface{}, flags uint32, depth int) s
 			if rm, ok := value.(json.RawMessage); ok {
 				// If it's empty make sure we emit an empty value as the array style would below.
 				if len(rm) > 0 {
-					buf.Write(rm)
+					_, _ = buf.Write(rm)
 				} else {
-					buf.WriteString("null")
+					_, _ = buf.WriteString("null")
 				}
 				return buf.String()
 			}
 		}
-		buf.WriteByte('[')
+		_ = buf.WriteByte('[')
 		for i := 0; i < v.Len(); i++ {
 			if i > 0 {
-				buf.WriteByte(',')
+				_ = buf.WriteByte(',')
 			}
 			e := v.Index(i)
-			buf.WriteString(f.prettyWithFlags(e.Interface(), 0, depth+1))
+			_, _ = buf.WriteString(f.prettyWithFlags(e.Interface(), 0, depth+1))
 		}
-		buf.WriteByte(']')
+		_ = buf.WriteByte(']')
 		return buf.String()
 	case reflect.Map:
-		buf.WriteByte('{')
+		_ = buf.WriteByte('{')
 		// This does not sort the map keys, for best perf.
 		it := v.MapRange()
 		i := 0
 		for it.Next() {
 			if i > 0 {
-				buf.WriteByte(',')
+				_ = buf.WriteByte(',')
 			}
 			// If a map key supports TextMarshaler, use it.
 			keystr := ""
@@ -555,12 +565,12 @@ func (f Formatter) prettyWithFlags(value interface{}, flags uint32, depth int) s
 					keystr = prettyString(keystr)
 				}
 			}
-			buf.WriteString(keystr)
-			buf.WriteByte(':')
-			buf.WriteString(f.prettyWithFlags(it.Value().Interface(), 0, depth+1))
+			_, _ = buf.WriteString(keystr)
+			_ = buf.WriteByte(':')
+			_, _ = buf.WriteString(f.prettyWithFlags(it.Value().Interface(), 0, depth+1))
 			i++
 		}
-		buf.WriteByte('}')
+		_ = buf.WriteByte('}')
 		return buf.String()
 	case reflect.Ptr, reflect.Interface:
 		if v.IsNil() {
@@ -576,10 +586,13 @@ func prettyString(s string) string {
 	if needsEscape(s) {
 		return strconv.Quote(s)
 	}
-	b := bytes.NewBuffer(make([]byte, 0, 1024))
-	b.WriteByte('"')
-	b.WriteString(s)
-	b.WriteByte('"')
+	b := bytebufferpool.Get()
+	defer func() {
+		bytebufferpool.Put(b)
+	}()
+	_ = b.WriteByte('"')
+	_, _ = b.WriteString(s)
+	_ = b.WriteByte('"')
 	return b.String()
 }
 
@@ -792,9 +805,10 @@ func (f *Formatter) AddValues(kvList []interface{}) {
 	}
 
 	// Pre-render values, so we don't have to do it on each Info/Error call.
-	buf := bytes.NewBuffer(make([]byte, 0, 1024))
+	buf := bytebufferpool.Get()
 	f.flatten(buf, vals, false, true) // escape user-provided keys
 	f.valuesStr = buf.String()
+	bytebufferpool.Put(buf)
 }
 
 // AddCallDepth increases the number of stack-frames to skip when attributing
